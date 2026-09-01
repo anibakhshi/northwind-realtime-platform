@@ -1,0 +1,21 @@
+{
+  "connector.class": "io.debezium.connector.sqlserver.SqlServerConnector",
+  "tasks.max": "1",
+  "database.hostname": "sqlserver",
+  "database.port": "1433",
+  "database.user": "__DEBEZIUM_SQLSERVER_USER__",
+  "database.password": "__DEBEZIUM_SQLSERVER_PASSWORD__",
+  "database.names": "Northwind",
+  "database.encrypt": "false",
+  "topic.prefix": "northwind",
+  "table.include.list": "dbo.Customers,dbo.Products,dbo.Orders,dbo.Order Details",
+  "snapshot.mode": "initial",
+  "schema.history.internal.kafka.bootstrap.servers": "kafka:9092",
+  "schema.history.internal.kafka.topic": "schemahistory.northwind",
+  "schema.history.internal.store.only.captured.tables.ddl": "false",
+  "include.schema.changes": "true",
+  "tombstones.on.delete": "false",
+  "decimal.handling.mode": "string",
+  "time.precision.mode": "connect",
+  "heartbeat.interval.ms": "10000"
+}
