@@ -13,6 +13,7 @@ services:
     volumes:
       - sqlserver_data:/var/opt/mssql
       - ./data/backups:/var/opt/mssql/backup
+      - ./sql/sqlserver:/var/opt/mssql/scripts:ro
     networks:
       - data-platform
     restart: unless-stopped
