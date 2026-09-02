@@ -257,10 +257,59 @@ import os
 payload = json.loads(os.environ["DASHBOARD_JSON"])
 dashboard = payload["dashboard"]
 assert dashboard["uid"] == "northwind-realtime-overview"
-assert len(dashboard["panels"]) == 9
+panels = dashboard["panels"]
+panel_titles = {
+    panel.get("title")
+    for panel in panels
+}
+
+required_titles = {
+    "Net Revenue",
+    "Distinct Orders",
+    "Average Order Value",
+    "Units Sold",
+    "Average Discount",
+    "Monthly Revenue Trend",
+    "Top Markets by Revenue",
+    "Revenue Mix by Category",
+    "Monthly Order Volume",
+    "Top Products",
+    "Top Customers",
+    "Recent Orders",
+    "Warehouse Row Health",
+}
+
+missing_titles = required_titles - panel_titles
+
+variables = {
+    item["name"]
+    for item in dashboard["templating"]["list"]
+}
+
+required_variables = {
+    "year",
+    "country",
+    "category",
+}
+
+assert dashboard["title"] == (
+    "Northwind Real-Time Commerce Intelligence"
+)
+assert not missing_titles, (
+    f"Missing dashboard panels: {sorted(missing_titles)}"
+)
+assert required_variables <= variables, (
+    f"Missing variables: "
+    f"{sorted(required_variables - variables)}"
+)
+
+print(
+    f"dashboard_panels={len(panels)} "
+    f"dashboard_variables={len(variables)}"
+)
 PY
 then
-  pass "Grafana dashboard panels=9"
+  pass "Grafana dashboard structure"
 else
   fail "Grafana dashboard"
 fi
