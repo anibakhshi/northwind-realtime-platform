@@ -1,0 +1,39 @@
+services:
+  grafana:
+    build:
+      context: .
+      dockerfile: docker/grafana/Dockerfile
+    image: northwind-realtime-grafana:13.2.1
+    hostname: grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: "${GRAFANA_ADMIN_USER}"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: "/var/lib/grafana/dashboards/northwind-overview.json"
+      GRAFANA_CLICKHOUSE_USER: "${GRAFANA_CLICKHOUSE_USER}"
+      GRAFANA_CLICKHOUSE_PASSWORD: "${GRAFANA_CLICKHOUSE_PASSWORD}"
+      CLICKHOUSE_DB: "${CLICKHOUSE_DB}"
+    ports:
+      - "${GRAFANA_PORT}:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget --quiet --spider http://localhost:3000/api/health || exit 1
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    networks:
+      - data-platform
+    restart: unless-stopped
+
+volumes:
+  grafana_data:

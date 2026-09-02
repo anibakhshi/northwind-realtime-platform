@@ -1,0 +1,26 @@
+apiVersion: 1
+
+deleteDatasources:
+  - name: Northwind ClickHouse
+    orgId: 1
+
+datasources:
+  - name: Northwind ClickHouse
+    uid: northwind-clickhouse
+    type: grafana-clickhouse-datasource
+    access: proxy
+    orgId: 1
+    isDefault: true
+    editable: false
+    jsonData:
+      host: clickhouse
+      port: 9000
+      protocol: native
+      username: $GRAFANA_CLICKHOUSE_USER
+      defaultDatabase: $CLICKHOUSE_DB
+      configMode: classic
+      secure: false
+      validateSql: true
+      queryTimeout: 60
+    secureJsonData:
+      password: $GRAFANA_CLICKHOUSE_PASSWORD

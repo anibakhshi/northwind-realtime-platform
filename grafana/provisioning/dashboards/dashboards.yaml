@@ -1,0 +1,14 @@
+apiVersion: 1
+
+providers:
+  - name: Northwind
+    orgId: 1
+    folder: Northwind
+    folderUid: northwind
+    type: file
+    disableDeletion: false
+    allowUiUpdates: true
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false
