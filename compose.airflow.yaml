@@ -1,0 +1,81 @@
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: docker/airflow/Dockerfile
+  image: northwind-realtime-airflow:2.10.5
+  user: "${AIRFLOW_UID}:0"
+  group_add:
+    - "${DOCKER_GID}"
+  environment: &airflow-environment
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: "${AIRFLOW_DATABASE_URL}"
+    AIRFLOW__CORE__FERNET_KEY: "${AIRFLOW_FERNET_KEY}"
+    AIRFLOW__WEBSERVER__SECRET_KEY: "${AIRFLOW_SECRET_KEY}"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__PARALLELISM: "4"
+    AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: "2"
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+    SPARK_CONTAINER_NAME: "${COMPOSE_PROJECT_NAME}-spark-1"
+    CLICKHOUSE_CONTAINER_NAME: "${COMPOSE_PROJECT_NAME}-clickhouse-1"
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags:ro
+    - ./airflow/logs:/opt/airflow/logs
+    - ./airflow/plugins:/opt/airflow/plugins:ro
+    - /var/run/docker.sock:/var/run/docker.sock
+  depends_on:
+    postgres:
+      condition: service_healthy
+  networks:
+    - data-platform
+
+services:
+  airflow-init:
+    <<: *airflow-common
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+
+        airflow db migrate
+
+        if airflow users list | grep -q "${AIRFLOW_ADMIN_USERNAME}"; then
+          echo "Airflow administrator already exists."
+        else
+          airflow users create \
+            --username "${AIRFLOW_ADMIN_USERNAME}" \
+            --password "${AIRFLOW_ADMIN_PASSWORD}" \
+            --firstname Anita \
+            --lastname Bakhshi \
+            --role Admin \
+            --email admin@northwind.local
+        fi
+    restart: "no"
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "${AIRFLOW_PORT}:8080"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl --fail http://localhost:8080/health || exit 1
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
