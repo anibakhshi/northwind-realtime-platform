@@ -14,7 +14,12 @@ from psycopg2.extras import RealDictCursor
 
 
 PIPELINE_NAME = "postgres_to_clickhouse_incremental"
-SUPPORTED_TABLES = {"Customers", "Products"}
+SUPPORTED_TABLES = {
+    "Customers",
+    "Products",
+    "Orders",
+    "Order Details",
+}
 DEFAULT_BATCH_SIZE = 1000
 
 NORTHWIND_CATEGORIES = {
@@ -255,6 +260,45 @@ def fetch_current_products(cursor, product_ids):
     return {row["product_id"]: row for row in cursor.fetchall()}
 
 
+def fetch_current_order_lines(cursor, order_ids):
+    if not order_ids:
+        return []
+    cursor.execute(
+        """
+        SELECT
+            orders.source_event_id AS order_source_event_id,
+            orders.source_timestamp AS order_source_timestamp,
+            orders.order_id,
+            orders.customer_id,
+            orders.employee_id,
+            orders.order_date,
+            orders.required_date,
+            orders.shipped_date,
+            orders.ship_via,
+            orders.freight,
+            orders.ship_name,
+            orders.ship_address,
+            orders.ship_city,
+            orders.ship_region,
+            orders.ship_postal_code,
+            orders.ship_country,
+            details.source_event_id AS detail_source_event_id,
+            details.source_timestamp AS detail_source_timestamp,
+            details.product_id,
+            details.unit_price,
+            details.quantity,
+            details.discount
+        FROM staging.v_orders_current AS orders
+        INNER JOIN staging.v_order_details_current AS details
+            ON orders.order_id = details.order_id
+        WHERE orders.order_id = ANY(%s)
+        ORDER BY orders.order_id, details.product_id
+        """,
+        (order_ids,),
+    )
+    return cursor.fetchall()
+
+
 def fetch_clickhouse_customers(database):
     rows = clickhouse_select(
         f"""
@@ -353,6 +397,85 @@ def fetch_clickhouse_suppliers(database):
     for row in rows:
         result[int(row["supplier_alternate_key"])] = row["supplier_key"]
     return result
+
+
+def fetch_clickhouse_employees(database):
+    rows = clickhouse_select(
+        f"""
+        SELECT
+            employee_key,
+            employee_alternate_key,
+            updated_at
+        FROM {database}.dim_employees FINAL
+        WHERE employee_alternate_key IS NOT NULL
+        ORDER BY employee_alternate_key, updated_at
+        """
+    )
+    result = {}
+    for row in rows:
+        result[int(row["employee_alternate_key"])] = row["employee_key"]
+    return result
+
+
+def fetch_clickhouse_shippers(database):
+    rows = clickhouse_select(
+        f"""
+        SELECT
+            shipper_key,
+            shipper_alternate_key,
+            updated_at
+        FROM {database}.dim_shippers FINAL
+        WHERE shipper_alternate_key IS NOT NULL
+        ORDER BY shipper_alternate_key, updated_at
+        """
+    )
+    result = {}
+    for row in rows:
+        result[int(row["shipper_alternate_key"])] = row["shipper_key"]
+    return result
+
+
+def fetch_clickhouse_date_keys(database):
+    rows = clickhouse_select(
+        f"SELECT date_key FROM {database}.dim_date"
+    )
+    return {int(row["date_key"]) for row in rows}
+
+
+def fetch_clickhouse_order_facts(database, order_ids):
+    if not order_ids:
+        return {}
+    safe_order_ids = ",".join(str(int(value)) for value in order_ids)
+    rows = clickhouse_select(
+        f"""
+        SELECT
+            order_id,
+            geography_key,
+            product_key,
+            customer_key,
+            employee_key,
+            shipper_key,
+            order_date_key,
+            required_date_key,
+            shipped_date_key,
+            freight,
+            ship_name,
+            unit_price,
+            quantity,
+            discount,
+            order_date,
+            shipped_date,
+            required_date,
+            updated_at,
+            is_deleted
+        FROM {database}.fact_orders FINAL
+        WHERE order_id IN ({safe_order_ids})
+        """
+    )
+    return {
+        (int(row["order_id"]), int(row["product_key"])): row
+        for row in rows
+    }
 
 
 def build_customer_changes(
@@ -505,6 +628,183 @@ def build_product_changes(
     return product_rows
 
 
+def date_key(value):
+    if value is None:
+        return None
+    return int(value.strftime("%Y%m%d"))
+
+
+def build_date_row(value):
+    key = date_key(value)
+    quarter = ((value.month - 1) // 3) + 1
+    season_names = {
+        1: "Winter",
+        2: "Spring",
+        3: "Summer",
+        4: "Autumn",
+    }
+    return {
+        "date_key": key,
+        "full_date": value.date().isoformat(),
+        "calendar_year": value.year,
+        "calendar_season": quarter,
+        "season_name": season_names[quarter],
+        "month_number": value.month,
+        "month_name": value.strftime("%B"),
+        "day_number": value.day,
+        "day_of_week": value.isoweekday(),
+        "day_of_week_name": value.strftime("%A"),
+    }
+
+
+def ensure_geography(
+    geography_source,
+    event_timestamp,
+    existing_geographies,
+    geography_rows,
+):
+    identity = normalized_geography_key(geography_source)
+    existing = existing_geographies.get(identity)
+    if existing:
+        return existing["geography_key"]
+
+    generated_key = stable_uint64("geography", "|".join(identity))
+    row = {
+        "geography_key": generated_key,
+        **geography_source,
+        "updated_at": event_timestamp,
+        "is_deleted": 0,
+    }
+    geography_rows.append(row)
+    existing_geographies[identity] = row
+    return generated_key
+
+
+def build_fact_changes(
+    order_ids,
+    current_order_lines,
+    existing_facts,
+    existing_customers,
+    existing_products,
+    employee_keys,
+    shipper_keys,
+    existing_geographies,
+    existing_date_keys,
+):
+    geography_rows = []
+    date_rows = []
+    fact_rows = []
+    desired_keys = set()
+
+    for current in current_order_lines:
+        order_id = int(current["order_id"])
+        product_id = int(current["product_id"])
+        product = existing_products.get(product_id)
+        customer = existing_customers.get(current.get("customer_id"))
+
+        if product is None:
+            raise RuntimeError(
+                f"Missing product dimension for ProductID={product_id}"
+            )
+        if customer is None:
+            raise RuntimeError(
+                "Missing customer dimension for "
+                f"CustomerID={current.get('customer_id')}"
+            )
+
+        employee_id = current.get("employee_id")
+        employee_key = employee_keys.get(employee_id)
+        if employee_id is not None and employee_key is None:
+            raise RuntimeError(
+                f"Missing employee dimension for EmployeeID={employee_id}"
+            )
+
+        shipper_id = current.get("ship_via")
+        shipper_key = shipper_keys.get(shipper_id)
+        if shipper_id is not None and shipper_key is None:
+            raise RuntimeError(
+                f"Missing shipper dimension for ShipperID={shipper_id}"
+            )
+
+        source_timestamps = [
+            value
+            for value in (
+                current.get("order_source_timestamp"),
+                current.get("detail_source_timestamp"),
+            )
+            if value is not None
+        ]
+        event_timestamp = utc_timestamp(
+            max(source_timestamps) if source_timestamps else None
+        )
+
+        geography_source = {
+            "country": current.get("ship_country"),
+            "region": current.get("ship_region"),
+            "city": current.get("ship_city"),
+            "postal_code": current.get("ship_postal_code"),
+            "address": current.get("ship_address"),
+        }
+        geography_key = ensure_geography(
+            geography_source,
+            event_timestamp,
+            existing_geographies,
+            geography_rows,
+        )
+
+        for value in (
+            current.get("order_date"),
+            current.get("required_date"),
+            current.get("shipped_date"),
+        ):
+            if value is None:
+                continue
+            key = date_key(value)
+            if key not in existing_date_keys:
+                date_rows.append(build_date_row(value))
+                existing_date_keys.add(key)
+
+        product_key = product["product_key"]
+        desired_key = (order_id, int(product_key))
+        desired_keys.add(desired_key)
+
+        fact_rows.append(
+            {
+                "order_id": order_id,
+                "geography_key": geography_key,
+                "product_key": product_key,
+                "customer_key": customer["customer_key"],
+                "employee_key": employee_key,
+                "shipper_key": shipper_key,
+                "order_date_key": date_key(current.get("order_date")),
+                "required_date_key": date_key(current.get("required_date")),
+                "shipped_date_key": date_key(current.get("shipped_date")),
+                "freight": current.get("freight"),
+                "ship_name": current.get("ship_name"),
+                "unit_price": current.get("unit_price"),
+                "quantity": current.get("quantity"),
+                "discount": current.get("discount"),
+                "order_date": current.get("order_date"),
+                "shipped_date": current.get("shipped_date"),
+                "required_date": current.get("required_date"),
+                "updated_at": event_timestamp,
+                "is_deleted": 0,
+            }
+        )
+
+    deleted_at = utc_timestamp()
+    affected_order_ids = set(order_ids)
+    for key, existing in existing_facts.items():
+        if key[0] not in affected_order_ids or key in desired_keys:
+            continue
+        deleted_row = dict(existing)
+        deleted_row["updated_at"] = deleted_at
+        deleted_row["is_deleted"] = 1
+        fact_rows.append(deleted_row)
+
+    return geography_rows, date_rows, fact_rows
+
+
 def complete_batch(cursor, old_watermark, new_watermark):
     cursor.execute(
         """
@@ -568,15 +868,34 @@ def main():
             product_ids = identifiers_from_events(
                 events, "Products", "ProductID", int
             )
+            order_ids = sorted(
+                set(
+                    identifiers_from_events(
+                        events, "Orders", "OrderID", int
+                    )
+                    + identifiers_from_events(
+                        events, "Order Details", "OrderID", int
+                    )
+                )
+            )
 
             current_customers = fetch_current_customers(
                 cursor, customer_ids
             )
             current_products = fetch_current_products(cursor, product_ids)
+            current_order_lines = fetch_current_order_lines(
+                cursor, order_ids
+            )
             existing_customers = fetch_clickhouse_customers(database)
             existing_geographies = fetch_clickhouse_geographies(database)
             existing_products = fetch_clickhouse_products(database)
             supplier_keys = fetch_clickhouse_suppliers(database)
+            employee_keys = fetch_clickhouse_employees(database)
+            shipper_keys = fetch_clickhouse_shippers(database)
+            existing_date_keys = fetch_clickhouse_date_keys(database)
+            existing_facts = fetch_clickhouse_order_facts(
+                database, order_ids
+            )
 
             geography_rows, customer_rows = build_customer_changes(
                 customer_ids,
@@ -591,14 +910,38 @@ def main():
                 supplier_keys,
             )
 
+            for row in customer_rows:
+                existing_customers[row["customer_alternate_key"]] = row
+            for row in product_rows:
+                existing_products[int(row["product_alternate_key"])] = row
+
+            fact_geography_rows, date_rows, fact_rows = build_fact_changes(
+                order_ids,
+                current_order_lines,
+                existing_facts,
+                existing_customers,
+                existing_products,
+                employee_keys,
+                shipper_keys,
+                existing_geographies,
+                existing_date_keys,
+            )
+            geography_rows.extend(fact_geography_rows)
+
             geographies_written = clickhouse_insert(
                 database, "dim_geography", geography_rows
+            )
+            dates_written = clickhouse_insert(
+                database, "dim_date", date_rows
             )
             customers_written = clickhouse_insert(
                 database, "dim_customer", customer_rows
             )
             products_written = clickhouse_insert(
                 database, "dim_products", product_rows
+            )
+            facts_written = clickhouse_insert(
+                database, "fact_orders", fact_rows
             )
 
             new_watermark = max(event["event_id"] for event in events)
@@ -612,8 +955,10 @@ def main():
                 f"events={len(events)} "
                 f"processed={processed_count} "
                 f"geographies={geographies_written} "
+                f"dates={dates_written} "
                 f"customers={customers_written} "
                 f"products={products_written} "
+                f"facts={facts_written} "
                 f"watermark={new_watermark}",
                 flush=True,
             )
