@@ -78,6 +78,16 @@ services:
       PYSPARK_PYTHON: "python3"
       PYSPARK_DRIVER_PYTHON: "python3"
       SPARK_LOCAL_IP: "spark"
+      SQLSERVER_HOST: "sqlserver"
+      SQLSERVER_PORT: "1433"
+      SQLSERVER_DATABASE: "Northwind_BI_1404_05_DW"
+      SQLSERVER_USER: "sa"
+      SQLSERVER_PASSWORD: "${MSSQL_SA_PASSWORD}"
+      CLICKHOUSE_HOST: "clickhouse"
+      CLICKHOUSE_PORT: "8123"
+      CLICKHOUSE_DATABASE: "${CLICKHOUSE_DB}"
+      CLICKHOUSE_USER: "${CLICKHOUSE_USER}"
+      CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD}"
     volumes:
       - ./spark/jobs:/opt/northwind/jobs:ro
       - spark_checkpoints:/opt/spark/checkpoints
@@ -86,6 +96,10 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      sqlserver:
+        condition: service_started
     command:
       - /opt/spark/bin/spark-submit
       - --master
